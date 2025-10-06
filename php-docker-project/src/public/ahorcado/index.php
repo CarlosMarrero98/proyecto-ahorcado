@@ -1,124 +1,108 @@
 <?php
-session_start();
+declare(strict_types=1);
 
-$palabras = ["PROGRAMACION", "PHP", "AHORCADO", "JUEGO", "WEB"];
+require_once __DIR__ . '/Storage.php';
+require_once __DIR__ . '/Game.php';
+require_once __DIR__ . '/WordProvider.php';
+require_once __DIR__ . '/Renderer.php';
 
-if (!isset($_SESSION['palabra'])) {
-    $_SESSION['palabra'] = $palabras[array_rand($palabras)];
-    $_SESSION['intentos'] = 6;
-    $_SESSION['letras_usadas'] = [];
+$WORDS_FILE   = __DIR__ . '/palabras.txt';
+$MAX_ATTEMPTS = 6;
+
+$storage = new Storage('ahorcado');
+
+$action = $_POST['action'] ?? null;
+if ($action === 'reset') {
+  $storage->reset();
+  header('Location: ' . ($_SERVER['PHP_SELF'] ?? '/'));
+  exit;
 }
 
-if (isset($_POST['letra'])) {
-    $letra = strtoupper($_POST['letra']);
-    if (!in_array($letra, $_SESSION['letras_usadas'])) {
-        $_SESSION['letras_usadas'][] = $letra;
-        if (strpos($_SESSION['palabra'], $letra) === false) {
-            $_SESSION['intentos']--;
-        }
+$state = $storage->get('state', null);
+
+if ($state !== null) {
+    // Restaurar desde estado previo
+    $game = new Game('', $MAX_ATTEMPTS, $state);
+} else {
+    // Nueva partida con palabra aleatoria del .txt (o fallback)
+    try {
+        $provider = new WordProvider($WORDS_FILE);
+        $word     = $provider->randomWord();
+    } catch (Throwable $e) {
+        // Si no hay fichero o está vacío, usa una palabra por defecto
+        $word = 'MANGO';
+    }
+    $game = new Game($word, $MAX_ATTEMPTS);
+    $storage->set('state', $game->toState());
+}
+
+// ---- PROCESAR JUGADA (si llega una letra) ----
+if ($action === 'guess') {
+    $letter = $_POST['letra'] ?? '';
+    // La validación fina la hace Game; aquí solo recortamos espacios
+    $letter = trim($letter);
+    if ($letter !== '') {
+        $game->guessLetter($letter);
+        $storage->set('state', $game->toState());
     }
 }
 
-$mostrar = "";
-foreach (str_split($_SESSION['palabra']) as $letra) {
-    $mostrar .= in_array($letra, $_SESSION['letras_usadas']) ? $letra : "_";
-}
+// ---- PREPARAR DATOS PARA LA VISTA ----
+$renderer   = new Renderer();
+$masked     = $game->getMaskedWord();
+$attempts   = $game->getAttemptsLeft();
+$used       = $game->getUsedLetters();
+$won        = $game->isWon();
+$lost       = $game->isLost();
+$ascii      = $renderer->ascii($attempts);
+$usedString = empty($used) ? '—' : implode(', ', $used);
 
-$mensaje = "";
-if ($mostrar === $_SESSION['palabra']) {
-    $mensaje = "Felicidades ¡Ganaste! La palabra era: " . $_SESSION['palabra'];
-}
-if ($_SESSION['intentos'] <= 0) {
-    $mensaje = "Lo siento ¡Perdiste! La palabra era: " . $_SESSION['palabra'];
-}
-
-function dibujoAhorcado($intentos) {
-    $estados = [
-        6 => " 
-  +---+
-  |   |
-      |
-      |
-      |
-      |
-========= ",
-        5 => " 
-  +---+
-  |   |
-  O   |
-      |
-      |
-      |
-========= ",
-        4 => " 
-  +---+
-  |   |
-  O   |
-  |   |
-      |
-      |
-========= ",
-        3 => " 
-  +---+
-  |   |
-  O   |
- /|   |
-      |
-      |
-========= ",
-        2 => " 
-  +---+
-  |   |
-  O   |
- /|\  |
-      |
-      |
-========= ",
-        1 => " 
-  +---+
-  |   |
-  O   |
- /|\  |
- /    |
-      |
-========= ",
-        0 => " 
-  +---+
-  |   |
-  O   |
- /|\  |
- / \  |
-      |
-========= "
-    ];
-    return "<pre>" . $estados[$intentos] . "</pre>";
-}
+// ---- HTML ----
 ?>
 <!DOCTYPE html>
-<html>
+<html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>Ahorcado en PHP</title>
+  <meta charset="utf-8">
+  <title>Ahorcado</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
-<body>
-<h1>Juego del Ahorcado</h1>
+<body style="font-family: monospace; padding: 1rem;">
+  <h1>Juego del Ahorcado</h1>
 
-<?php echo dibujoAhorcado($_SESSION['intentos']); ?>
+  <?= $ascii ?>
 
-<p>Palabra: <?php echo implode(" ", str_split($mostrar)); ?></p>
-<p>Intentos restantes: <?php echo $_SESSION['intentos']; ?></p>
-<p>Letras usadas: <?php echo implode(", ", $_SESSION['letras_usadas']); ?></p>
+  <p><strong>Palabra:</strong> <?= htmlspecialchars($masked, ENT_QUOTES, 'UTF-8') ?></p>
+  <p><strong>Intentos restantes:</strong> <?= (int)$attempts ?></p>
+  <p><strong>Letras usadas:</strong> <?= htmlspecialchars($usedString, ENT_QUOTES, 'UTF-8') ?></p>
 
-<?php if ($mensaje == ""): ?>
-    <form method="post">
-        <label>Introduce una letra:</label>
-        <input type="text" name="letra" maxlength="1" required>
-        <button type="submit">Adivinar</button>
+  <?php if ($won): ?>
+    <h2>🎉 ¡Has ganado!</h2>
+    <p>La palabra era: <strong><?= htmlspecialchars($game->getWord(), ENT_QUOTES, 'UTF-8') ?></strong></p>
+  <?php elseif ($lost): ?>
+    <h2>💀 Has perdido</h2>
+    <p>La palabra era: <strong><?= htmlspecialchars($game->getWord(), ENT_QUOTES, 'UTF-8') ?></strong></p>
+  <?php else: ?>
+    <form method="post" style="margin-top:1rem;">
+      <input type="hidden" name="action" value="guess">
+      <label>
+        Letra:
+        <input
+          type="text"
+          name="letra"
+          maxlength="1"
+          required
+          pattern="[A-Za-zÑñÁÉÍÓÚÜáéíóúü]"
+          title="Introduce una letra (A-Z o Ñ)"
+          autofocus
+        >
+      </label>
+      <button type="submit">Probar</button>
     </form>
-<?php else: ?>
-    <p><strong><?php echo $mensaje; ?></strong></p>
-    <a href="reset.php">Jugar de nuevo</a>
-<?php endif; ?>
+  <?php endif; ?>
 
+  <form method="post" style="margin-top:1rem;">
+    <input type="hidden" name="action" value="reset">
+    <button type="submit">Nueva partida</button>
+  </form>
 </body>
 </html>
